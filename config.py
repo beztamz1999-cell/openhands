@@ -9,10 +9,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
 
-# Load .env file
-load_dotenv()
-
+# Load .env file from script directory
 BASE_DIR = Path(__file__).parent
+load_dotenv(BASE_DIR / ".env")
 
 
 @dataclass
@@ -21,7 +20,7 @@ class GoLoginConfig:
     token: str = field(default_factory=lambda: os.getenv("GOLOGIN_TOKEN", ""))
     profile_id: Optional[str] = field(default_factory=lambda: os.getenv("GOLOGIN_PROFILE_ID", ""))
     base_url: str = "https://api.gologin.com"
-    browser_url: str = "https://browser.gologin.com"
+    browser_url: str = "https://gologin.com"  # Updated URL
 
 
 @dataclass
