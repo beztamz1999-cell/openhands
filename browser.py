@@ -7,10 +7,10 @@ import asyncio
 import json
 from typing import Optional, Dict, Any, List
 from pathlib import Path
-import httpx
 from loguru import logger
 
 from config import config
+from gologin_client import GoLoginClient, GoLoginAPIError
 
 
 class GoLoginBrowser:
@@ -26,7 +26,17 @@ class GoLoginBrowser:
         self.profile_id = None
         self._playwright = None
         self.ws_url = None
+        self.client = None
         
+    def _get_client(self) -> GoLoginClient:
+        """Get or create GoLogin client"""
+        if not config.gologin.token:
+            raise ValueError("GoLogin API token is required. Get it from https://app.gologin.com/")
+        
+        if not self.client:
+            self.client = GoLoginClient(token=config.gologin.token)
+        return self.client
+    
     async def initialize(self) -> None:
         """Initialize Playwright"""
         try:
@@ -37,136 +47,74 @@ class GoLoginBrowser:
             logger.error("Playwright not installed. Run: pip install playwright && playwright install chromium")
             raise
     
-    async def init_api(self) -> httpx.AsyncClient:
-        """Initialize GoLogin API client"""
-        if not config.gologin.token:
-            raise ValueError("GoLogin API token is required. Get it from https://app.gologin.com/")
-        
-        client = httpx.AsyncClient(
-            base_url=config.gologin.browser_url,
-            headers={
-                "Authorization": f"Bearer {config.gologin.token}",
-                "Content-Type": "application/json"
-            },
-            timeout=30.0
-        )
-        return client
-    
     async def create_profile(self, name: str = "REI Checker Profile") -> Dict[str, Any]:
-        """Create a new browser profile"""
-        api = await self.init_api()
-        
-        profile_data = {
-            "name": name,
-            "os": "win",
-            "browserType": "chromium",
-            "maskType": "stable",
-            "viewport": {
-                "width": config.browser.viewport_width,
-                "height": config.browser.viewport_height
-            },
-            "webgl": {"mode": "noise"},
-            "timezone": {"mode": "auto"},
-            "geo": {"mode": "auto"},
-            "dns": {"mode": "auto"},
-            "permissions": ["microphone", "camera"],
-            "storage": {"isLocal": True}
-        }
-        
-        # Add proxy if enabled
-        if config.proxy.enabled:
-            proxy_mode = "http"
-            profile_data["proxy"] = {
-                "mode": proxy_mode,
-                "host": config.proxy.host,
-                "port": config.proxy.port,
-                "username": config.proxy.user,
-                "password": config.proxy.password
-            }
-        else:
-            profile_data["proxy"] = {"mode": "none"}
+        """Create a new browser profile using quick profile"""
+        client = self._get_client()
         
         try:
-            response = await api.post("/browser/profiles", json=profile_data)
-            response.raise_for_status()
-            profile = response.json()
-            logger.info(f"Created GoLogin profile: {profile['id']}")
-            await api.aclose()
+            # Use quick profile creation (simplest method)
+            profile = client.create_quick_profile(name=name, os_type="win")
+            logger.info(f"Created GoLogin profile: {profile.get('id', 'unknown')}")
             return profile
-        except httpx.HTTPError as e:
+        except GoLoginAPIError as e:
             logger.error(f"Failed to create profile: {e}")
-            await api.aclose()
             raise
     
     async def list_profiles(self) -> List[Dict[str, Any]]:
         """List all browser profiles"""
-        api = await self.init_api()
+        client = self._get_client()
         
         try:
-            response = await api.get("/browser/profiles")
-            response.raise_for_status()
-            profiles = response.json()
-            await api.aclose()
+            profiles = client.list_profiles()
+            logger.info(f"Found {len(profiles)} profiles")
             return profiles
-        except httpx.HTTPError as e:
+        except GoLoginAPIError as e:
             logger.error(f"Failed to list profiles: {e}")
-            await api.aclose()
             return []
     
     async def delete_profile(self, profile_id: str) -> None:
         """Delete a browser profile"""
-        api = await self.init_api()
+        client = self._get_client()
         
         try:
-            response = await api.delete(f"/browser/profiles/{profile_id}")
-            response.raise_for_status()
+            client.delete_profiles([profile_id])
             logger.info(f"Deleted profile: {profile_id}")
-            await api.aclose()
-        except httpx.HTTPError as e:
+        except GoLoginAPIError as e:
             logger.error(f"Failed to delete profile: {e}")
-            await api.aclose()
     
     async def start_browser(self, profile_id: str) -> str:
         """Start browser with GoLogin profile, return WebSocket URL"""
-        api = await self.init_api()
+        client = self._get_client()
         
         try:
-            response = await api.post(
-                f"/browser/profiles/{profile_id}/start",
-                json={"headless": config.browser.headless}
-            )
-            response.raise_for_status()
-            data = response.json()
+            # Run profile on cloud browser
+            result = client.run_profile_cloud(profile_id)
             
-            ws_url = data.get("wsUrl")
-            status = data.get("status", "")
+            # The result should contain WebSocket URL or connection info
+            ws_url = result.get("wsUrl") or result.get("data", {}).get("wsUrl")
             
-            if status != "Success" and not ws_url:
-                raise RuntimeError(f"Failed to start browser: {status}")
+            if not ws_url:
+                # Try alternative: use get_cloud_connect_url
+                ws_url = client.get_cloud_connect_url(profile_id)
             
             logger.info(f"Browser started with profile: {profile_id}")
             self.ws_url = ws_url
             self.profile_id = profile_id
-            await api.aclose()
             return ws_url
             
-        except httpx.HTTPError as e:
+        except GoLoginAPIError as e:
             logger.error(f"Failed to start browser: {e}")
-            await api.aclose()
             raise
     
     async def stop_browser(self, profile_id: str) -> None:
         """Stop browser"""
-        api = await self.init_api()
+        client = self._get_client()
         
         try:
-            response = await api.post(f"/browser/profiles/{profile_id}/stop")
-            response.raise_for_status()
+            client.stop_profile_cloud(profile_id)
             logger.info(f"Browser stopped for profile: {profile_id}")
-            await api.aclose()
-        except httpx.HTTPError as e:
+        except GoLoginAPIError as e:
             logger.warning(f"Failed to stop browser: {e}")
-            await api.aclose()
     
     async def connect(self, ws_url: str) -> None:
         """Connect to GoLogin browser using Playwright CDP"""
@@ -174,6 +122,7 @@ class GoLoginBrowser:
             await self.initialize()
         
         try:
+            # Connect to Cloud Browser via WebSocket
             self.browser = await self._playwright.chromium.connect_over_cdp(ws_url)
             
             # Get context or create new one
@@ -208,21 +157,28 @@ class GoLoginBrowser:
             use_existing: Use existing profile if available
             profile_id: Use specific profile ID
         """
+        # Check token first
+        if not config.gologin.token:
+            raise ValueError("GoLogin API token is required. Get it from https://app.gologin.com/")
+        
         target_profile_id = profile_id or config.gologin.profile_id
         
         # If no profile specified, create new or use existing
         if not target_profile_id:
             if use_existing:
                 profiles = await self.list_profiles()
-                if profiles:
-                    target_profile_id = profiles[0]["id"]
+                if profiles and len(profiles) > 0:
+                    target_profile_id = profiles[0].get("id")
                     logger.info(f"Using existing profile: {target_profile_id}")
                 else:
                     new_profile = await self.create_profile(profile_name)
-                    target_profile_id = new_profile["id"]
+                    target_profile_id = new_profile.get("id")
             else:
                 new_profile = await self.create_profile(profile_name)
-                target_profile_id = new_profile["id"]
+                target_profile_id = new_profile.get("id")
+        
+        if not target_profile_id:
+            raise ValueError("Could not get or create a profile")
         
         # Start browser and connect
         ws_url = await self.start_browser(target_profile_id)
