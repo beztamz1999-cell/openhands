@@ -9,10 +9,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
 
-# Load .env file
-load_dotenv()
-
+# Load .env file from script directory
 BASE_DIR = Path(__file__).parent
+load_dotenv(BASE_DIR / ".env")
 
 
 @dataclass
