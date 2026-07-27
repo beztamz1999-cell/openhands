@@ -87,15 +87,37 @@ class GoLoginBrowser:
         client = self._get_client()
         
         try:
-            # Run profile on cloud browser
+            # Run profile on cloud browser - this should return WebSocket URL
             result = client.run_profile_cloud(profile_id)
+            logger.info(f"Cloud browser result: {result}")
             
-            # The result should contain WebSocket URL or connection info
-            ws_url = result.get("wsUrl") or result.get("data", {}).get("wsUrl")
+            # Try to extract WebSocket URL from result
+            # The API returns different formats, check all possible locations
+            ws_url = None
+            
+            # Direct wsUrl field
+            if isinstance(result, dict):
+                ws_url = result.get("wsUrl") or result.get("websocketUrl")
+                # Check nested data object
+                if not ws_url and "data" in result:
+                    ws_url = result["data"].get("wsUrl") or result["data"].get("websocketUrl")
+                # Check success/data with different formats
+                if not ws_url and "success" in result:
+                    ws_url = result.get("success", {}).get("wsUrl") if isinstance(result.get("success"), dict) else None
+            
+            # If still no wsUrl but we got a response, try to construct from the connect URL
+            if not ws_url:
+                logger.warning(f"No wsUrl in response, checking alternative methods")
+                # The response might contain connection info we can use
+                connect_url = client.get_cloud_connect_url(profile_id)
+                
+                # Convert HTTP URL to WebSocket URL
+                if connect_url:
+                    ws_url = connect_url.replace("https://", "wss://").replace("http://", "ws://")
+                    logger.info(f"Converted to WebSocket: {ws_url[:50]}...")
             
             if not ws_url:
-                # Try alternative: use get_cloud_connect_url
-                ws_url = client.get_cloud_connect_url(profile_id)
+                raise ValueError(f"Could not get WebSocket URL from cloud browser response: {result}")
             
             logger.info(f"Browser started with profile: {profile_id}")
             self.ws_url = ws_url
@@ -103,6 +125,9 @@ class GoLoginBrowser:
             return ws_url
             
         except GoLoginAPIError as e:
+            logger.error(f"Failed to start browser: {e}")
+            raise
+        except Exception as e:
             logger.error(f"Failed to start browser: {e}")
             raise
     
